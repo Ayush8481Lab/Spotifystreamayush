@@ -21,14 +21,12 @@ function userAgent() {
   return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36";
 }
 
-// Emulate the original string-to-buffer conversion without Node.js Buffer
 function getSecretBytes(data) {
   const mappedData = data.map((value, index) => value ^ ((index % 33) + 9));
   const secretString = mappedData.join("");
   return new TextEncoder().encode(secretString); 
 }
 
-// Pure Web Crypto TOTP implementation
 async function generateTOTP(secretBytes, timestampMs) {
   const timeStep = Math.floor((timestampMs / 1000) / 30);
   const timeBuffer = new ArrayBuffer(8);
@@ -96,8 +94,7 @@ export default async function handler(req) {
   }
 
   try {
-    // 2. PARALLEL FETCHING (Massive Speed Boost!)
-    // We fetch the Github secrets and the Spotify Server Time at the exact same time instead of waiting for one to finish first.
+    // 2. PARALLEL FETCHING
     const [serverTime] = await Promise.all([
       getServerTime(),
       updateTOTPSecrets()
@@ -128,18 +125,30 @@ export default async function handler(req) {
 
     // 5. EXTRACT AND MODIFY THE RESPONSE
     const tokenData = await tokenResponse.json();
-    
-    // Inject the custom note string precisely as requested
     tokenData._notes = "Developed By Ayush@8481";
 
-    // 6. RETURN MODIFIED RESPONSE WITH 45 MIN CACHING
-    // Using JSON.stringify(..., null, 2) makes the response pretty-printed just like your example.
+    // 6. DYNAMIC CACHE CALCULATION (Exactly 10 mins before expiry)
+    const nowMs = Date.now();
+    // Default to 1 hour (3600000ms) ahead if Spotify fails to return the timestamp for some reason
+    const expirationMs = tokenData.accessTokenExpirationTimestampMs || (nowMs + 3600000); 
+    const remainingTimeMs = expirationMs - nowMs;
+    
+    // Subtract 10 minutes (600,000 milliseconds) from remaining time
+    let cacheDurationSeconds = Math.floor((remainingTimeMs - 600000) / 1000);
+    
+    // Safety check: if somehow it's expiring very soon, don't cache it (set to 0)
+    cacheDurationSeconds = Math.max(0, cacheDurationSeconds);
+
+    // 7. RETURN DYNAMICALLY CACHED RESPONSE
     return new Response(JSON.stringify(tokenData, null, 2), {
       status: tokenResponse.status,
       headers: {
         'Content-Type': 'application/json',
         ...corsHeaders,
-        'Cache-Control': 'public, s-maxage=2700, stale-while-revalidate=60',
+        // Set the dynamically calculated cache time!
+        'Cache-Control': cacheDurationSeconds > 0 
+            ? `public, s-maxage=${cacheDurationSeconds}, stale-while-revalidate=30`
+            : 'no-store', // Tell Vercel not to cache if the token is dangerously close to expiring
       },
     });
 
